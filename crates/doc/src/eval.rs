@@ -826,6 +826,12 @@ fn new_name(state: &mut ModelState, f: &Feature, k: usize) -> String {
     {
         return n.clone();
     }
+    if f.body_name_series
+        && let Some(base) = f.body_names.iter().map(|n| n.trim()).find(|n| !n.is_empty())
+    {
+        let n = if k == 0 { base.to_string() } else { format!("{base} ({})", k.saturating_add(1)) };
+        return if state.body(&n).is_none() { n } else { unique_body_name(state, base) };
+    }
     loop {
         state.body_counter += 1;
         let n = format!("Body{}", state.body_counter);

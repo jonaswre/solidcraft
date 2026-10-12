@@ -39,13 +39,16 @@
 //! - 13: exact planar shell face anchors retain the shell producer, original certified
 //!   source and distinct inner/outer role. Version 12 anchors retain their identities;
 //!   migration never guesses attachments for older designs.
+//! - 14: features may set `body_name_series`, numbering the bodies past their `body_names`
+//!   after the first name (`Ribs`, `Ribs (2)`, …). Older designs lack the marker and keep
+//!   their `BodyN` names, so later features that name those bodies still find them.
 
 use serde_json::Value;
 
 use crate::{DocError, Document, Result};
 
 /// The format this build writes.
-pub const FORMAT: u32 = 13;
+pub const FORMAT: u32 = 14;
 
 pub fn format_string(n: u32) -> String {
     format!("solvecraft/{n}")
@@ -58,8 +61,21 @@ pub fn version_of(s: &str) -> Option<u32> {
 
 /// JSON-level upgrades: entry `i` turns format `i + 1` into `i + 2`.
 type JsonStep = fn(&mut Value) -> Result<()>;
-const JSON_STEPS: [JsonStep; 12] =
-    [|_| Ok(()), v2_to_v3, v3_to_v4, v4_to_v5, v5_to_v6, |_| Ok(()), |_| Ok(()), |_| Ok(()), |_| Ok(()), |_| Ok(()), |_| Ok(()), |_| Ok(())];
+const JSON_STEPS: [JsonStep; 13] = [
+    |_| Ok(()),
+    v2_to_v3,
+    v3_to_v4,
+    v4_to_v5,
+    v5_to_v6,
+    |_| Ok(()),
+    |_| Ok(()),
+    |_| Ok(()),
+    |_| Ok(()),
+    |_| Ok(()),
+    |_| Ok(()),
+    |_| Ok(()),
+    |_| Ok(()),
+];
 
 /// Old XZ references retain their exact frame, including nested offset and angled planes.
 /// New origin references use +Y; freezing the old frame avoids changing sketch coordinates,

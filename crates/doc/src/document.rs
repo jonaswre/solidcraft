@@ -1539,6 +1539,11 @@ pub struct Feature {
     /// Names for the bodies this feature creates (in order); missing ones get `BodyN`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub body_names: Vec<String>,
+    /// Bodies past `body_names` are numbered after its first name (`Ribs`, `Ribs (2)`,
+    /// `Ribs (3)`) instead of getting `BodyN`. Set when a command names the bodies; absent in
+    /// designs saved before format 14, which keep the `BodyN` names they had.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub body_name_series: bool,
     /// Parameter names of the feature's inputs (see `FeatureKind::inputs`), e.g. `d3`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_names: Vec<String>,
@@ -1577,6 +1582,10 @@ fn zero_expr() -> String {
 
 fn is_root(c: &u64) -> bool {
     *c == 0
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// A standard part (fastener, pin, bearing) inserted as a component.
@@ -1887,6 +1896,7 @@ impl Document {
             name,
             suppressed: false,
             body_names: Vec::new(),
+            body_name_series: false,
             param_names: Vec::new(),
             component,
             edge_refs: Vec::new(),

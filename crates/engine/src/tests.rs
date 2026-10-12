@@ -2360,8 +2360,49 @@ fn multi_profile_extrude_names_every_body_after_body_name() {
         run(&mut s, "sketch.rectangle.two_point", json!({"p0": [x, 0], "p1": [x + 5, 30]}));
     }
     run(&mut s, "sketch.finish", json!({}));
-    run(&mut s, "solid.extrude", json!({"distance": "10", "operation": "new_body", "body_name": "Ribs"}));
+    let reply = run(&mut s, "solid.extrude", json!({"distance": "10", "operation": "new_body", "body_name": "Ribs"}));
     let names: Vec<String> = s.model.state().bodies.iter().map(|b| b.name.clone()).collect();
     assert!(names.iter().all(|n| n.starts_with("Ribs")), "{names:?}");
     assert!(rel(volume(&mut s), 4500.0) < 1e-6);
+    // The bodies are numbered like copies, and the reply lists them.
+    let ribs = ["Ribs", "Ribs (2)", "Ribs (3)"];
+    assert_eq!(body_names(&s), ribs);
+    assert_eq!(reply["created"], json!(ribs), "{reply}");
+
+    // Recompute, undo/redo and save/reopen keep the names.
+    run(&mut s, "parameters.add", json!({"name": "unused", "expression": "1 mm"}));
+    run(&mut s, "edit.undo", json!({}));
+    run(&mut s, "edit.undo", json!({}));
+    assert!(body_names(&s).is_empty());
+    run(&mut s, "edit.redo", json!({}));
+    assert_eq!(body_names(&s), ribs);
+    let dir = std::env::temp_dir().join(format!("solvecraft-ribs-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let design = dir.join("ribs.solvecraft");
+    run(&mut s, "file.save_as", json!({"path": design.to_string_lossy()}));
+    let mut reopened = Session::default();
+    run(&mut reopened, "doc.open", json!({"path": design.to_string_lossy()}));
+    assert_eq!(body_names(&reopened), ribs);
+
+    // A profile added later gets the next number; the others keep theirs.
+    let sk = s.doc.find_feature("R").map(|f| f.id).unwrap();
+    run(&mut s, "sketch.edit", json!({"sketch": sk}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [30, 0], "p1": [35, 30]}));
+    run(&mut s, "sketch.finish", json!({}));
+    assert_eq!(body_names(&s), ["Ribs", "Ribs (2)", "Ribs (3)", "Ribs (4)"]);
+
+    // A design saved before the numbering keeps the generic names its later features may use.
+    let mut legacy: Value = serde_json::from_str(&std::fs::read_to_string(&design).unwrap()).unwrap();
+    legacy["format"] = json!("solvecraft/13");
+    let markers = legacy["features"].as_array_mut().unwrap().iter_mut().filter_map(|f| f.as_object_mut().unwrap().remove("body_name_series"));
+    assert_eq!(markers.count(), 1, "only the extrude numbers its bodies");
+    std::fs::write(&design, legacy.to_string()).unwrap();
+    let mut old = Session::default();
+    run(&mut old, "doc.open", json!({"path": design.to_string_lossy()}));
+    assert_eq!(body_names(&old), ["Ribs", "Body1", "Body2"]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn body_names(s: &Session) -> Vec<String> {
+    s.model.state().bodies.iter().map(|b| b.name.clone()).collect()
 }
