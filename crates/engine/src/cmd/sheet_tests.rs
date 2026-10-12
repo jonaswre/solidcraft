@@ -1584,6 +1584,28 @@ fn fold_one_of_two_collinear_tabs() {
     let flat = volume(&mut s);
     run(&mut s, "sheet.fold", json!({"points": [[107, 5, 0.8], [107, 12, 0.8]], "fixed": [50, 20, 0.8]}));
     assert!(rel(volume(&mut s), flat) < 1e-3, "a fold keeps the material");
+    // Only the lower tab bends: the upper one still reaches x = 115 flat.
+    let bb = &run(&mut s, "inspect.measure", json!({}))["bodies"][0]["bbox"];
+    assert!((bb["max"][0].as_f64().unwrap() - 115.0).abs() < 1e-6 && bb["max"][2].as_f64().unwrap() > 7.0, "{bb}");
+    let f = run(&mut s, "sheet.flat_pattern", json!({}));
+    assert_eq!(f["flat_size_mm"], json!([115.0, 40.0, 0.8]), "{f}");
+    let bends = f["bends"].as_array().unwrap();
+    assert_eq!(bends.len(), 1, "{f}");
+    assert!((bends[0]["length"].as_f64().unwrap() - 7.0).abs() < 1e-6, "{f}");
+    assert_eq!(run(&mut s, "sheet.export_dxf", json!({}))["bends"], 1);
+    for command in ["sheet.unfold", "sheet.refold"] {
+        run(&mut s, command, json!({}));
+        assert!(rel(volume(&mut s), flat) < 1e-3, "{command}");
+    }
+    run(&mut s, "edit.undo", json!({}));
+    run(&mut s, "edit.undo", json!({}));
+    run(&mut s, "edit.undo", json!({}));
+    assert!(flat_bends(&mut s).is_empty());
+    assert!(rel(volume(&mut s), flat) < 1e-9);
+}
+
+fn flat_bends(s: &mut Session) -> Vec<Value> {
+    flat(s)["bends"].as_array().cloned().unwrap_or_default()
 }
 
 /// One fold line across both tabs bends both (#264).
@@ -1596,6 +1618,22 @@ fn fold_across_two_collinear_tabs() {
     assert!(rel(volume(&mut s), flat) < 1e-3);
     let bb = &run(&mut s, "inspect.measure", json!({}))["bodies"][0]["bbox"];
     assert!(bb["max"][2].as_f64().unwrap() > 7.0, "both tabs stand up: {bb}");
+    assert!(bb["max"][0].as_f64().unwrap() < 110.0, "no tab stays flat: {bb}");
+    // One feature, two bend zones of the tabs' width, one flat pattern.
+    let f = run(&mut s, "sheet.flat_pattern", json!({}));
+    assert_eq!(f["flat_size_mm"], json!([115.0, 40.0, 0.8]), "{f}");
+    let bends = flat_bends(&mut s);
+    assert_eq!(bends.len(), 2, "{f}");
+    for (b, y) in bends.iter().zip([5.0, 28.0]) {
+        assert!((b["length"].as_f64().unwrap() - 7.0).abs() < 1e-6, "{f}");
+        assert!((b["start"][1].as_f64().unwrap() - y).abs() < 1e-6, "{f}");
+        assert_eq!(b["direction"], bends[0]["direction"]);
+    }
+    assert_eq!(run(&mut s, "sheet.export_dxf", json!({}))["bends"], 2);
+    for command in ["sheet.unfold", "sheet.refold"] {
+        run(&mut s, command, json!({}));
+        assert!(rel(volume(&mut s), flat) < 1e-3, "{command}");
+    }
 }
 
 /// Edge flanges on both tab ends in one feature (two separate features already work) (#264).
@@ -1609,4 +1647,27 @@ fn edge_flanges_on_two_collinear_tab_ends_in_one_feature() {
     run(&mut separate, "sheet.flange", json!({"edges": [[115, 8, 0.8]], "height": "10"}));
     run(&mut separate, "sheet.flange", json!({"edges": [[115, 31, 0.8]], "height": "10"}));
     assert!(rel(volume(&mut s), volume(&mut separate)) < 1e-6);
+    // Each flange sets back only its own tab, so both flat patterns match.
+    let (one, two) = (flat(&mut s), flat(&mut separate));
+    assert_eq!(one["flat_size_mm"], two["flat_size_mm"]);
+    assert_eq!(flat_bends(&mut s).len(), 2, "{one}");
+    for (a, b) in flat_bends(&mut s).iter().zip(flat_bends(&mut separate)) {
+        assert!((a["start"][1].as_f64().unwrap() - b["start"][1].as_f64().unwrap()).abs() < 1e-6, "{one} {two}");
+        assert!((a["length"].as_f64().unwrap() - 7.0).abs() < 1e-6, "{one}");
+    }
+}
+
+/// A flange on the other tab stays on the flat tab when one tab is folded (#264).
+#[test]
+fn folding_one_tab_leaves_the_flange_on_the_other_tab() {
+    let mut s = Session::default();
+    two_tab_blank(&mut s);
+    run(&mut s, "sheet.flange", json!({"edges": [[115, 31, 0.8]], "height": "10"}));
+    let before = volume(&mut s);
+    run(&mut s, "sheet.fold", json!({"points": [[107, 5, 0.8], [107, 12, 0.8]], "fixed": [50, 20, 0.8]}));
+    assert!(rel(volume(&mut s), before) < 1e-3);
+    assert_eq!(flat_bends(&mut s).len(), 2);
+    // The upper tab's flange still stands at its end, x ≈ 115.
+    let bb = &run(&mut s, "inspect.measure", json!({}))["bodies"][0]["bbox"];
+    assert!((bb["max"][0].as_f64().unwrap() - 115.0).abs() < 1e-3, "{bb}");
 }
