@@ -2371,3 +2371,43 @@ fn deleting_a_sketch_leaves_no_silently_failing_feature() {
         );
     }
 }
+
+/// The sketch, its extrude making body `P`, and a combine that joins box `Q` into `P` by name.
+fn sketch_extrude_and_named_combine() -> Session {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "S"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [20, 20]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.extrude", json!({"sketch": "S", "distance": "10", "body_name": "P"}));
+    run(&mut s, "solid.box", json!({"length": 5, "width": 5, "height": 5, "corner": [18, 5, 0], "operation": "new_body", "body_name": "Q"}));
+    run(&mut s, "solid.combine", json!({"target": "P", "tools": ["Q"], "name": "JoinPQ"}));
+    s
+}
+
+/// Before deleting, the dependents a delete would break include a feature that only names the
+/// body by name, so the confirmation can warn about it (#267).
+#[test]
+fn dependents_of_a_sketch_list_a_feature_that_names_its_body() {
+    let mut s = sketch_extrude_and_named_combine();
+    let deps = run(&mut s, "timeline.dependents", json!({"feature": "S"}));
+    let names = |k: &str| -> Vec<String> { deps[k].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect() };
+    assert!(names("deleted_with_it").iter().any(|n| n.starts_with("Extrude")), "the extrude goes with its sketch: {deps}");
+    assert_eq!(names("would_fail"), vec!["JoinPQ".to_string()], "{deps}");
+}
+
+/// The delete reply names each feature that worked before and fails now, with its error (#267).
+#[test]
+fn timeline_delete_reports_the_features_it_breaks() {
+    let mut s = sketch_extrude_and_named_combine();
+    let join = s.doc.find_feature("JoinPQ").map(|f| f.id);
+    let reply = run(&mut s, "timeline.delete", json!({"features": ["S"]}));
+    let failed = reply["failed"].as_array().cloned().unwrap_or_default();
+    assert_eq!(failed.len(), 1, "{reply}");
+    assert_eq!(failed[0]["name"], "JoinPQ", "{reply}");
+    assert_eq!(failed[0]["id"].as_u64(), join, "{reply}");
+    assert!(failed[0]["error"].as_str().is_some_and(|e| e.contains('P')), "{reply}");
+    // A delete that breaks nothing says so.
+    run(&mut s, "solid.box", json!({"length": 5, "width": 5, "height": 5, "corner": [80, 0, 0], "name": "Lone"}));
+    let reply = run(&mut s, "timeline.delete", json!({"features": ["Lone"]}));
+    assert_eq!(reply["failed"], json!([]), "{reply}");
+}

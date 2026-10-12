@@ -1,7 +1,7 @@
 //! Undo/redo, the timeline, deletion and selection.
 
 use serde_json::{Value, json};
-use solvecraft_doc::{Feature, FeatureKind};
+use solvecraft_doc::{Feature, FeatureKind, FeatureResult};
 
 use super::CommandSpec;
 use crate::params::{bad, bool_, num, str_, string_list};
@@ -17,11 +17,10 @@ pub static COMMANDS: &[CommandSpec] = &[
         .noundo()
         .params("checkpoint: id; forget?: bool (true = drop it without going back). Goes back to it, undo history included"),
     CommandSpec::new("timeline.compute_all", "Compute All", compute_all).at("SOLID", "MODIFY").icon("compute").noundo(),
-    CommandSpec::new("timeline.delete", "Delete", delete)
-        .at("SOLID", "MODIFY")
-        .icon("delete")
-        .key("Delete")
-        .params("features: [id or name] (a sketch takes its dependent features with it)"),
+    CommandSpec::new("timeline.delete", "Delete", delete).at("SOLID", "MODIFY").icon("delete").key("Delete").params(
+        "features: [id or name] (a sketch takes its dependent features with it) → deleted: ids, \
+             failed: [{id, name, error}] (kept features that worked before and fail now)",
+    ),
     CommandSpec::new("timeline.rename", "Rename", rename).params("feature: id|name, name"),
     CommandSpec::new("timeline.rollback", "Move Timeline Marker", rollback).params("position: number of features to keep active (omit = end)"),
     CommandSpec::new("timeline.roll_to", "Roll History Marker", rollback)
@@ -120,6 +119,7 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
     if keys.is_empty() {
         return Err(bad(cmd, "`features` must list features"));
     }
+    let before = s.model.clone();
     let mut gone = Vec::new();
     for k in keys {
         let Some(id) = s.doc.find_feature(&k).map(|f| f.id) else {
@@ -134,7 +134,11 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
         s.active_sketch = None;
     }
     s.selection.clear();
-    Ok(json!({"deleted": gone}))
+    // Features that use what went by name (a combine's target body...) are kept; they fail now,
+    // so the reply says which and why.
+    s.refresh();
+    let failed: Vec<Value> = newly_failing(&before, &s.model).map(|r| json!({"id": r.id, "name": r.name, "error": r.error})).collect();
+    Ok(json!({"deleted": gone, "failed": failed}))
 }
 
 fn rename(s: &mut Session, p: &Value) -> Result<Value> {
@@ -346,17 +350,14 @@ fn select_clear(s: &mut Session, _p: &Value) -> Result<Value> {
     Ok(json!({"selected": 0}))
 }
 
+/// Results of the features that worked in `before` and fail in `after`.
+fn newly_failing<'a>(before: &'a solvecraft_doc::Model, after: &'a solvecraft_doc::Model) -> impl Iterator<Item = &'a FeatureResult> {
+    after.results.iter().filter(|r| r.error.is_some() && before.result(r.id).is_some_and(|b| b.error.is_none() && !b.skipped))
+}
+
 /// Features that worked in `before` and fail in `after`: (name, error).
 fn newly_broken(before: &solvecraft_doc::Model, after: &solvecraft_doc::Model) -> Vec<(String, String)> {
-    after
-        .results
-        .iter()
-        .filter_map(|r| {
-            let e = r.error.clone()?;
-            let was_ok = before.result(r.id).is_some_and(|b| b.error.is_none() && !b.skipped);
-            was_ok.then(|| (r.name.clone(), e))
-        })
-        .collect()
+    newly_failing(before, after).filter_map(|r| Some((r.name.clone(), r.error.clone()?))).collect()
 }
 
 fn reorder(s: &mut Session, p: &Value) -> Result<Value> {
