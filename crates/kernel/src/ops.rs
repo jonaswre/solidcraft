@@ -470,6 +470,74 @@ fn boolean_whole(a: &Body, b: &Body, op: BoolOp) -> Result<Option<Body>> {
     Err(KernelError::Failed(format!("boolean {op:?}: {last}")))
 }
 
+/// `a` less every one of `tools`. Tools clear of one another are cut in one boolean, as one body
+/// of several lumps: a pattern of N holes is one boolean instead of N, each against a target
+/// grown by every hole before it (#261). A tool that meets another goes in a later batch; a
+/// batch whose boolean fails is cut one tool at a time. The result may be empty (`Ok(None)`).
+pub fn cut_all(a: &Body, tools: &[Body]) -> Result<Option<Body>> {
+    let mut acc = Some(a.clone());
+    for batch in clear_batches(tools) {
+        let Some(cur) = acc else { return Ok(None) };
+        acc = match batch.as_slice() {
+            [one] => boolean(&cur, one, BoolOp::Cut)?,
+            _ => match join_pieces(batch.clone()).and_then(|tool| tool.map_or(Ok(Some(cur.clone())), |t| boolean(&cur, &t, BoolOp::Cut))) {
+                Ok(r) => r,
+                Err(_) => {
+                    let mut each = Some(cur);
+                    for t in &batch {
+                        each = match each {
+                            Some(x) => boolean(&x, t, BoolOp::Cut)?,
+                            None => None,
+                        };
+                    }
+                    each
+                }
+            },
+        };
+    }
+    Ok(acc)
+}
+
+/// Tools in batches whose members are clear of each other (their boxes apart), first fit in
+/// order. A tool without a box (a mesh body) is a batch of its own.
+fn clear_batches(tools: &[Body]) -> Vec<Vec<Body>> {
+    let mut batches: Vec<(Vec<Body>, Option<Vec<solvecraft_geom::Aabb3>>)> = Vec::new();
+    for t in tools {
+        let Some(bx) = tool_box(t) else {
+            batches.push((vec![t.clone()], None));
+            continue;
+        };
+        let fit = batches.iter_mut().find(|(_, boxes)| boxes.as_ref().is_some_and(|bs| bs.iter().all(|o| boxes_apart(o, &bx))));
+        match fit {
+            Some((members, Some(boxes))) => {
+                members.push(t.clone());
+                boxes.push(bx);
+            }
+            _ => batches.push((vec![t.clone()], Some(vec![bx]))),
+        }
+    }
+    batches.into_iter().map(|(members, _)| members).collect()
+}
+
+/// A box holding all of a B-rep tool: its coarse mesh's box, grown by more than the mesh's
+/// chord deviation (a chord of a round face lies inside it).
+fn tool_box(t: &Body) -> Option<solvecraft_geom::Aabb3> {
+    if t.is_mesh() {
+        return None;
+    }
+    let tol = (t.size() * 1e-2).max(1e-6);
+    let bx = t.tessellate(tol).ok()?.bounds();
+    if bx.is_empty() {
+        return None;
+    }
+    let pad = Vec3::new(1.0, 1.0, 1.0) * (2.0 * tol);
+    Some(solvecraft_geom::Aabb3 { min: bx.min - pad, max: bx.max + pad })
+}
+
+fn boxes_apart(x: &solvecraft_geom::Aabb3, y: &solvecraft_geom::Aabb3) -> bool {
+    x.max.x < y.min.x || y.max.x < x.min.x || x.max.y < y.min.y || y.max.y < x.min.y || x.max.z < y.min.z || y.max.z < x.min.z
+}
+
 /// A boolean of bodies given as their pieces; the result's pieces in one body.
 fn by_lumps(la: Vec<Body>, lb: Vec<Body>, op: BoolOp) -> Result<Option<Body>> {
     let boxes_meet = |x: &Body, y: &Body| -> bool {

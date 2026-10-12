@@ -170,6 +170,37 @@ fn pattern_of_512_hole_cuts_finishes_in_reasonable_time() {
     });
     let (v, took) = rx.recv_timeout(Duration::from_secs(60)).expect("the 512-hole pattern did not finish within 60 s");
     let v = v.expect("pattern");
-    assert!(rel(v, 200.0 * 100.0 - 512.0 * PI) < 1e-6, "{v}");
+    // The measure meshes the bores: each hole reads about 0.06 % small, so allow 0.1 % a hole.
+    assert!((v - (200.0 * 100.0 - 512.0 * PI)).abs() < 512.0 * PI * 1e-3, "{v}");
     assert!(took < Duration::from_secs(20), "512 holes took {took:?}");
+}
+
+/// 128 circles in one sketch cut by one extrude (#261): the tools of a single cut, not a pattern,
+/// went through one boolean each against an ever more complex plate.
+#[test]
+fn one_extrude_of_128_circles_cuts_in_reasonable_time() {
+    use std::time::{Duration, Instant};
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 200, "width": 100, "height": 1, "operation": "new_body", "body_name": "Plate"}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "offset": "2", "name": "H"}));
+    for i in 0..16 {
+        for j in 0..8 {
+            run(&mut s, "sketch.circle.center", json!({"center": [4 + 6 * i, 4 + 6 * j], "diameter": 2}));
+        }
+    }
+    run(&mut s, "sketch.finish", json!({}));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let t = Instant::now();
+        let r = s.execute(
+            "solid.extrude",
+            &json!({"sketch": "H", "distance": "4", "direction": "negative", "operation": "cut", "targets": ["Plate"], "name": "Holes"}),
+        );
+        let v = r.map(|_| volume(&mut s)).map_err(|e| e.to_string());
+        let _ = tx.send((v, t.elapsed()));
+    });
+    let (v, took) = rx.recv_timeout(Duration::from_secs(60)).expect("the 128-circle cut did not finish within 60 s");
+    let v = v.expect("cut");
+    assert!((v - (200.0 * 100.0 - 128.0 * PI)).abs() < 128.0 * PI * 1e-3, "{v}");
+    assert!(took < Duration::from_secs(10), "128 circles took {took:?}");
 }

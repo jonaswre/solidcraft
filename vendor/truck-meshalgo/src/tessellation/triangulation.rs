@@ -344,8 +344,150 @@ fn get_mindiff(u: f64, u0: f64, up: f64) -> f64 {
     (-2..=2).map(closure).min_by(abs_diff(u0)).unwrap()
 }
 
+// SolveCraft: the second field indexes the loops' segments for `include`.
 #[derive(Debug, Default, Clone)]
-struct PolyBoundary(Vec<Vec<Point2>>);
+struct PolyBoundary(Vec<Vec<Point2>>, Option<BoundaryGrid>);
+
+/// SolveCraft: the segments of a boundary bucketed in a uniform grid, so that `include` visits
+/// only the cells along its ray instead of every segment. `include` runs for every grid point
+/// and every triangle of a face, so a face with hundreds of holes (a perforated plate) cost the
+/// square of its boundary size. Each segment is entered in every cell its box (padded by far
+/// more than the traversal's round-off and the on-boundary tolerance) overlaps; the cells a
+/// ray passes through then hold every segment it can cross, and the count over them is the
+/// count over all segments.
+#[derive(Debug, Clone)]
+struct BoundaryGrid {
+    segs: Vec<(Point2, Point2)>,
+    lo: Point2,
+    hi: Point2,
+    cell: (f64, f64),
+    side: usize,
+    cells: Vec<Vec<u32>>,
+}
+
+impl BoundaryGrid {
+    /// Fewer segments than this are tested one by one.
+    const MIN_SEGMENTS: usize = 64;
+
+    fn new(loops: &[Vec<Point2>]) -> Option<Self> {
+        let segs: Vec<(Point2, Point2)> =
+            loops.iter().flat_map(|v| v.iter().copied().circular_tuple_windows()).collect();
+        if segs.len() < Self::MIN_SEGMENTS || u32::try_from(segs.len()).is_err() {
+            return None;
+        }
+        let mut lo = Point2::new(f64::INFINITY, f64::INFINITY);
+        let mut hi = Point2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for p in segs.iter().map(|s| s.0) {
+            lo = Point2::new(lo.x.min(p.x), lo.y.min(p.y));
+            hi = Point2::new(hi.x.max(p.x), hi.y.max(p.y));
+        }
+        if ![lo.x, lo.y, hi.x, hi.y].iter().all(|x| x.is_finite()) {
+            return None;
+        }
+        let pad = 4.0 * TOLERANCE + (hi.x - lo.x).max(hi.y - lo.y) * 1.0e-9;
+        let (lo, hi) = (Point2::new(lo.x - pad, lo.y - pad), Point2::new(hi.x + pad, hi.y + pad));
+        let side = ((segs.len() as f64).sqrt().ceil() as usize).clamp(1, 1024);
+        let cell = ((hi.x - lo.x) / side as f64, (hi.y - lo.y) / side as f64);
+        if !(cell.0 > 0.0 && cell.1 > 0.0 && cell.0.is_finite() && cell.1.is_finite()) {
+            return None;
+        }
+        let spad = cell.0.max(cell.1) * 1.0e-6 + 2.0 * TOLERANCE;
+        let index = |x: f64, lo: f64, size: f64| (((x - lo) / size).floor().max(0.0) as usize).min(side - 1);
+        let mut cells = vec![Vec::new(); side * side];
+        // Long slanted segments fill many cells; past this budget the plain test is cheaper.
+        let mut budget = segs.len().saturating_mul(32).max(1 << 16);
+        for (i, (p, q)) in segs.iter().enumerate() {
+            let (i0, i1) = (index(p.x.min(q.x) - spad, lo.x, cell.0), index(p.x.max(q.x) + spad, lo.x, cell.0));
+            let (j0, j1) = (index(p.y.min(q.y) - spad, lo.y, cell.1), index(p.y.max(q.y) + spad, lo.y, cell.1));
+            budget = budget.checked_sub((i1 - i0 + 1) * (j1 - j0 + 1))?;
+            for j in j0..=j1 {
+                for k in i0..=i1 {
+                    cells[j * side + k].push(i as u32);
+                }
+            }
+        }
+        Some(Self { segs, lo, hi, cell, side, cells })
+    }
+
+    /// The segments in the cells the ray from `c` along `r` passes through (each once).
+    fn candidates(&self, c: Point2, r: Vector2) -> Vec<u32> {
+        let mut out = Vec::new();
+        // Clip the ray to the grid's box.
+        let (mut t0, mut t1) = (0.0_f64, f64::INFINITY);
+        for (o, d, lo, hi) in [(c.x, r.x, self.lo.x, self.hi.x), (c.y, r.y, self.lo.y, self.hi.y)] {
+            if d == 0.0 {
+                if o < lo || o > hi {
+                    return out;
+                }
+            } else {
+                let (a, b) = ((lo - o) / d, (hi - o) / d);
+                t0 = t0.max(a.min(b));
+                t1 = t1.min(a.max(b));
+            }
+        }
+        if !(t0 <= t1) {
+            return out;
+        }
+        let side = self.side as i64;
+        let start = |o: f64, d: f64, lo: f64, size: f64| ((((o + d * t0) - lo) / size).floor() as i64).clamp(0, side - 1);
+        let (mut i, mut j) = (start(c.x, r.x, self.lo.x, self.cell.0), start(c.y, r.y, self.lo.y, self.cell.1));
+        let axis = |o: f64, d: f64, lo: f64, size: f64, k: i64| -> (i64, f64, f64) {
+            if d > 0.0 {
+                (1, (lo + (k + 1) as f64 * size - o) / d, size / d)
+            } else if d < 0.0 {
+                (-1, (lo + k as f64 * size - o) / d, -size / d)
+            } else {
+                (0, f64::INFINITY, f64::INFINITY)
+            }
+        };
+        let (si, mut ti, di) = axis(c.x, r.x, self.lo.x, self.cell.0, i);
+        let (sj, mut tj, dj) = axis(c.y, r.y, self.lo.y, self.cell.1, j);
+        for _ in 0..2 * self.side + 2 {
+            if let Some(cell) = self.cells.get((j * side + i) as usize) {
+                out.extend_from_slice(cell);
+            }
+            if ti < tj {
+                if ti > t1 {
+                    break;
+                }
+                i += si;
+                ti += di;
+            } else {
+                if tj > t1 {
+                    break;
+                }
+                j += sj;
+                tj += dj;
+            }
+            if i < 0 || j < 0 || i >= side || j >= side {
+                break;
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+}
+
+/// The winding count of a ray from `c` along `r` after segment `p0`-`p1` (`None` when `c` is
+/// on the segment). Truck's test, moved out of `include` unchanged.
+fn ray_crossing(c: Point2, r: Vector2, counter: i32, p0: &Point2, p1: &Point2) -> Option<i32> {
+    let a = p0 - c;
+    let b = p1 - c;
+    let s0 = r.x * a.y - r.y * a.x; // v times a
+    let s1 = r.x * b.y - r.y * b.x; // v times b
+    let s2 = a.x * b.y - a.y * b.x; // a times b
+    let x = s2 / (s1 - s0);
+    if x.so_small() && s0 * s1 < 0.0 {
+        None
+    } else if x > 0.0 && s0 <= 0.0 && s1 > 0.0 {
+        Some(counter + 1)
+    } else if x > 0.0 && s0 >= 0.0 && s1 < 0.0 {
+        Some(counter - 1)
+    } else {
+        Some(counter)
+    }
+}
 
 fn normalize_range(curve: &mut Vec<Point2>, compidx: usize, (u0, u1): (f64, f64)) {
     let p = curve[0];
@@ -485,35 +627,28 @@ impl PolyBoundary {
                 closed.push(connect_edges([vec0, vec1, vec2, vec3]));
             }
         }
-        Self(closed)
+        let grid = BoundaryGrid::new(&closed);
+        Self(closed, grid)
     }
 
     /// whether `c` is included in the domain with boundary = `self`.
     fn include(&self, c: Point2) -> bool {
         let t = 2.0 * std::f64::consts::PI * HashGen::hash1(c);
         let r = Vector2::new(f64::cos(t), f64::sin(t));
-        self.0
-            .iter()
-            .flat_map(|vec| vec.iter().circular_tuple_windows())
-            .try_fold(0_i32, move |counter, (p0, p1)| {
-                let a = p0 - c;
-                let b = p1 - c;
-                let s0 = r.x * a.y - r.y * a.x; // v times a
-                let s1 = r.x * b.y - r.y * b.x; // v times b
-                let s2 = a.x * b.y - a.y * b.x; // a times b
-                let x = s2 / (s1 - s0);
-                if x.so_small() && s0 * s1 < 0.0 {
-                    None
-                } else if x > 0.0 && s0 <= 0.0 && s1 > 0.0 {
-                    Some(counter + 1)
-                } else if x > 0.0 && s0 >= 0.0 && s1 < 0.0 {
-                    Some(counter - 1)
-                } else {
-                    Some(counter)
-                }
-            })
-            .map(|counter| counter > 0)
-            .unwrap_or(false)
+        // SolveCraft: only the segments along the ray when the boundary is indexed.
+        let count = match &self.1 {
+            Some(grid) => grid
+                .candidates(c, r)
+                .into_iter()
+                .filter_map(|i| grid.segs.get(i as usize))
+                .try_fold(0_i32, |counter, (p0, p1)| ray_crossing(c, r, counter, &p0, &p1)),
+            None => self
+                .0
+                .iter()
+                .flat_map(|vec| vec.iter().circular_tuple_windows())
+                .try_fold(0_i32, |counter, (p0, p1)| ray_crossing(c, r, counter, p0, p1)),
+        };
+        count.map(|counter| counter > 0).unwrap_or(false)
     }
 
     /// Inserts points and adds constraint into triangulation.

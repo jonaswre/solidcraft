@@ -966,13 +966,20 @@ fn apply_op(state: &mut ModelState, f: &Feature, tools: Vec<Body>, op: Operation
                 target_idx.iter().filter_map(|i| state.bodies.get(*i).map(|b| b.name.clone())).collect();
             let mut remove = Vec::new();
             for &ti in &target_idx {
-                let Some(mut acc) = state.bodies.get(ti).map(|b| Some(b.body.clone())) else { continue };
-                for t in &tools {
-                    acc = match acc {
-                        Some(a) => kernel::boolean(&a, t, bop)?,
-                        None => None,
-                    };
-                }
+                let Some(target) = state.bodies.get(ti).map(|b| b.body.clone()) else { continue };
+                // Tools clear of each other (a pattern of holes) are cut in one boolean.
+                let acc = if bop == BoolOp::Cut {
+                    kernel::cut_all(&target, &tools)?
+                } else {
+                    let mut acc = Some(target);
+                    for t in &tools {
+                        acc = match acc {
+                            Some(a) => kernel::boolean(&a, t, bop)?,
+                            None => None,
+                        };
+                    }
+                    acc
+                };
                 match acc {
                     Some(b) => {
                         if let Some(mb) = state.bodies.get_mut(ti) {
