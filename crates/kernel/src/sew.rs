@@ -479,6 +479,22 @@ mod tests {
         }
     }
 
+    /// An edge shorter than the vertex-merging grid has both ends on one vertex; truck's edge
+    /// constructor panicked on it (#268). Sewing refuses it as a degenerate edge instead.
+    #[test]
+    fn an_edge_whose_ends_share_a_vertex_is_refused_without_a_panic() {
+        let mut faces = box_faces(Vec3::ZERO, Vec3::new(2.0, 3.0, 4.0));
+        // Split the bottom face's first edge just past its start: 2e-7 apart, below the 1e-6 grid.
+        let Some(EdgeSpec::Line { a, b }) = faces[0].loops[0].first().copied() else { panic!("box face") };
+        let near = a + (b - a).normalized().unwrap() * 2e-7;
+        faces[0].loops[0].splice(0..1, [EdgeSpec::Line { a, b: near }, EdgeSpec::Line { a: near, b }]);
+        for touching in [false, true] {
+            let sources = vec![None; faces.len()];
+            let result = if touching { sew_touching_with_sources(&faces, &sources) } else { sew(&faces) };
+            assert!(matches!(result, Err(KernelError::Invalid(ref m)) if m.contains("degenerate edge")), "{:?}", result.err());
+        }
+    }
+
     #[test]
     fn sewing_preserves_inward_cavity_orientation_and_refuses_vertex_contact() {
         let outer = box_faces(Vec3::ZERO, Vec3::new(2.0, 3.0, 4.0));
