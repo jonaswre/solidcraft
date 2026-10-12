@@ -2375,3 +2375,13 @@ fn targeted_cut_keeps_an_overlapping_body_that_is_not_a_target() {
     assert_eq!(names, ["Frame", "Mesh"]);
     assert!(rel(volume(&mut s), 50.0 * 50.0 * 5.0 - 30.0 * 30.0 * 5.0 + 900.0) < 1e-6);
 }
+
+/// A primitive's `targets` must name existing bodies: a typo is refused instead of cutting every body (#260).
+#[test]
+fn primitive_cut_with_an_unknown_target_is_refused() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "operation": "new_body", "body_name": "Frame"}));
+    let err = s.execute("solid.cylinder", &json!({"radius": 2, "height": 10, "operation": "cut", "targets": ["Nope"]})).unwrap_err();
+    assert!(err.to_string().contains("`targets` must list existing bodies"), "{err}");
+    assert!(rel(volume(&mut s), 1000.0) < 1e-6);
+}
