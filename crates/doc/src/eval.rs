@@ -840,6 +840,18 @@ fn copy_body_name(state: &ModelState, f: &Feature, k: usize, source: &str) -> St
     unique_body_name(state, base)
 }
 
+/// The k-th body of a body pattern, the `instance`-th copy of `source`: its stored name, else
+/// `source (instance + 2)` (the source is instance 1), so renaming one copy does not shift the
+/// numbers of the copies after it. The first free `source (n)` when that number is taken.
+fn pattern_copy_name(state: &ModelState, f: &Feature, k: usize, instance: usize, source: &str) -> String {
+    if f.body_names.get(k).is_some_and(|name| !name.trim().is_empty()) {
+        return copy_body_name(state, f, k, source);
+    }
+    let base = if source.trim().is_empty() { "Body" } else { source.trim() };
+    let numbered = format!("{base} ({})", instance.saturating_add(2));
+    if state.body(&numbered).is_none() { numbered } else { unique_body_name(state, base) }
+}
+
 /// Add tool bodies to the model according to the operation.
 fn sheet_boolean_unchanged(body: &Body, tools: &[Body], op: Operation) -> Result<()> {
     if sheet_boolean_changes(body, tools, op)? {
@@ -3058,9 +3070,9 @@ fn eval_feature(doc: &Document, vals: &BTreeMap<String, Value>, f: &Feature, st:
             let mut output = 0;
             for n in bodies {
                 let mb = st.body(n).cloned().ok_or_else(|| DocError::Unknown(format!("body `{n}`")))?;
-                for m in &mats {
+                for (instance, m) in mats.iter().enumerate() {
                     let copy = kernel::transform_matrix(&mb.body, *m)?;
-                    let name = copy_body_name(st, f, output, &mb.name);
+                    let name = pattern_copy_name(st, f, output, instance, &mb.name);
                     st.bodies.push(ModelBody::new(name, copy, f.id));
                     output += 1;
                 }

@@ -2364,3 +2364,28 @@ fn renaming_a_pattern_copy_keeps_the_other_copies_names() {
     let names: Vec<String> = s.model.state().bodies.iter().map(|b| b.name.clone()).collect();
     assert_eq!(names, ["X", "Second", "Third"]);
 }
+
+/// The names left after renaming a pattern copy survive undo/redo, save/reopen and count
+/// changes: more copies are added after the others, fewer drop the last ones (#265).
+#[test]
+fn pattern_copy_names_stay_put_across_recompute_and_count_changes() {
+    let mut s = Session::default();
+    let names = |s: &Session| -> Vec<String> { s.model.state().bodies.iter().map(|b| b.name.clone()).collect() };
+    run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10, "operation": "new_body", "body_name": "X"}));
+    run(&mut s, "solid.pattern.rectangular", json!({"bodies": ["X"], "dir1": [1, 0, 0], "count1": 3, "spacing1": 20}));
+    let pattern = s.doc.features.last().map(|f| f.name.clone()).unwrap();
+    run(&mut s, "body.rename", json!({"body": "X (2)", "name": "Second"}));
+    assert_eq!(names(&s), ["X", "Second", "X (3)"]);
+    run(&mut s, "edit.undo", json!({}));
+    assert_eq!(names(&s), ["X", "X (2)", "X (3)"]);
+    run(&mut s, "edit.redo", json!({}));
+    assert_eq!(names(&s), ["X", "Second", "X (3)"]);
+    let reopened = Session::new(solvecraft_doc::Document::from_json(&s.doc.to_json()).unwrap());
+    assert_eq!(names(&reopened), ["X", "Second", "X (3)"]);
+    run(&mut s, "timeline.edit", json!({"feature": pattern, "set": {"pattern": {"count1": "4"}}}));
+    assert_eq!(names(&s), ["X", "Second", "X (3)", "X (4)"]);
+    let fourth = run(&mut s, "inspect.measure", json!({"bodies": ["X (4)"]}));
+    assert_eq!(fourth["bodies"][0]["bbox"]["min"][0].as_f64().map(f64::round), Some(60.0), "X (4) is the new copy at x = 60: {fourth}");
+    run(&mut s, "timeline.edit", json!({"feature": pattern, "set": {"pattern": {"count1": "2"}}}));
+    assert_eq!(names(&s), ["X", "Second"]);
+}
