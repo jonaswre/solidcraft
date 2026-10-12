@@ -1586,3 +1586,58 @@ fn fold_fixed_point_off_the_sheet_is_not_silently_ignored() {
         }
     }
 }
+
+/// A `fixed` point that touches no material is refused and leaves the design untouched (#263).
+#[test]
+fn fold_refuses_a_fixed_point_off_the_sheet_atomically() {
+    let mut s = Session::default();
+    base(&mut s, 100.0, 60.0);
+    rectangle_tool(&mut s, "Window", [10.0, 15.0], [30.0, 45.0]);
+    run(&mut s, "solid.extrude", json!({"sketch": "Window", "through_all": true, "direction": "symmetric", "operation": "cut"}));
+    let before = s.doc.to_json();
+    let undo = s.undo.len();
+    // In the window, past the blank's outline, and well above the sheet.
+    for fixed in [json!([20, 30, 2.5]), json!([150, 30, 2.5]), json!([90, 30, 20])] {
+        let e = s.execute("sheet.fold", &json!({"points": [[50, 0, 2.5], [50, 60, 2.5]], "fixed": fixed})).unwrap_err().to_string();
+        assert!(e.contains("fixed") && e.contains("not on the sheet"), "{fixed}: {e}");
+        assert_eq!(s.doc.to_json(), before);
+        assert_eq!(s.undo.len(), undo);
+    }
+}
+
+/// A `fixed` point on the top or bottom face, on a side face, or a hair off a face still picks
+/// the side that stays: here the smaller (left) one, so the right part stands up.
+#[test]
+fn fold_keeps_the_side_of_a_fixed_point_on_any_face_of_the_sheet() {
+    for fixed in [json!([10, 30, 2.5]), json!([10, 30, 0]), json!([0, 30, 1.25]), json!([10, 30, 2.500001]), json!([10, 30, -0.000001])] {
+        let mut s = Session::default();
+        base(&mut s, 100.0, 60.0);
+        run(&mut s, "sheet.fold", json!({"points": [[40, 0, 2.5], [40, 60, 2.5]], "fixed": fixed}));
+        let b = bbox(&mut s);
+        assert!(b["min"][0].as_f64().unwrap_or(f64::NAN).abs() < 1e-6 && b["max"][0].as_f64().unwrap_or(f64::NAN) < 50.0, "{fixed}: {b}");
+        assert!(s.model.results.iter().all(|r| r.error.is_none() && r.warning.is_none()), "{fixed}: {:?}", s.model.results);
+    }
+}
+
+/// An upstream edit that leaves a stored `fixed` point off the sheet keeps the timeline working:
+/// the fold still keeps the side the point is on, and says so in a warning instead of failing.
+#[test]
+fn fold_whose_fixed_point_falls_off_the_sheet_after_an_upstream_edit_warns() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Base"}));
+    run(&mut s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [100, 60]}));
+    let d = run(&mut s, "sketch.dimension", json!({"entities": ["l1"], "value": 100}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "sheet.flange", json!({"sketch": "Base"}));
+    let fold = run(&mut s, "sheet.fold", json!({"points": [[40, 0, 2.5], [40, 60, 2.5]], "fixed": [90, 30, 2.5]}))["feature"].as_u64().unwrap();
+    assert_eq!(s.model.result(fold).and_then(|r| r.warning.clone()), None);
+    // Narrower blank: x = 90 is now past its right edge (x = 80).
+    let name = d["param"].as_str().or_else(|| d["name"].as_str()).map(str::to_string).unwrap_or_else(|| "d1".into());
+    run(&mut s, "parameters.change", json!({"name": name, "expression": "80"}));
+    let r = s.model.result(fold).cloned().unwrap();
+    assert_eq!(r.error, None);
+    assert!(r.warning.as_deref().is_some_and(|w| w.contains("fixed") && w.contains("not on the sheet")), "{:?}", r.warning);
+    // The right part (where the point was) still stays flat; the left part stands up.
+    let b = bbox(&mut s);
+    assert!((b["max"][0].as_f64().unwrap_or(f64::NAN) - 80.0).abs() < 1e-6 && b["min"][0].as_f64().unwrap_or(f64::NAN) > 30.0, "{b}");
+}
