@@ -1584,3 +1584,25 @@ fn fold_at_a_tab_root_names_the_real_cause() {
     outline_blank(&mut ok, json!([[0, 0], [100, 0], [100, 50], [60, 50], [60, 70], [40, 70], [40, 50], [0, 50]]));
     run(&mut ok, "sheet.fold", json!({"points": [[40, 51, 0.8], [60, 51, 0.8]], "fixed": [50, 25, 0.8]}));
 }
+
+/// The tab-root fold says where the bend zone meets the outline and how far to move the line (#262).
+#[test]
+fn fold_at_a_tab_root_says_where_and_how_far_to_move() {
+    let mut s = Session::default();
+    outline_blank(&mut s, json!([[0, 0], [100, 0], [100, 50], [60, 50], [60, 70], [40, 70], [40, 50], [0, 50]]));
+    let before = s.doc.to_json();
+    let e = s.execute("sheet.fold", &json!({"points": [[40, 50, 0.8], [60, 50, 0.8]], "fixed": [50, 25, 0.8]})).unwrap_err().to_string();
+    assert!(e.contains("reaches the edge of the sheet at ("), "{e}");
+    assert!(e.contains(", 50, 0.8)"), "the edge beside the tab, on the picked face: {e}");
+    assert!(e.contains("move the fold line at least") && e.contains("away from the fixed side"), "{e}");
+    assert_eq!(s.doc.to_json(), before);
+}
+
+/// A bend zone across a genuinely slanted edge keeps naming the slanted edge.
+#[test]
+fn fold_across_a_slanted_edge_names_the_slanted_edge() {
+    let mut s = Session::default();
+    outline_blank(&mut s, json!([[0, 0], [100, 0], [80, 50], [0, 50]]));
+    let e = s.execute("sheet.fold", &json!({"points": [[0, 25, 0.8], [50, 25, 0.8]], "fixed": [20, 10, 0.8]})).unwrap_err().to_string();
+    assert!(e.contains("slanted or curved"), "{e}");
+}

@@ -1383,7 +1383,8 @@ impl SheetBody {
         let us: Vec<f64> = strip.iter().map(|q| q.dot(d)).collect();
         let (u0, u1) = (us.iter().cloned().fold(f64::MAX, f64::min), us.iter().cloned().fold(f64::MIN, f64::max));
         if ((u1 - u0) * ba - signed_area(&strip).abs()).abs() > 1e-6 * (u1 - u0).max(1.0) * ba.max(1.0) {
-            return Err(DocError::Invalid("not supported yet: folds whose bend zone crosses a slanted or curved edge of the sheet".into()));
+            let z = apply_point(&inv, a).z;
+            return Err(self.bend_zone_error(panel, &pts, &strip, (a2 + b2) * 0.5, z, d, n, s0, ba));
         }
         let up = !flip;
         let leg = moving.iter().map(|q| q.dot(n) - s0 - ba).fold(0.0, f64::max);
@@ -1434,6 +1435,56 @@ impl SheetBody {
         // Cut-outs may cross the bend where their edges run along or across it (the faces
         // check the rest when the sheet is built).
         Ok(i)
+    }
+
+    /// Why a fold's bend zone (`s0..s0 + ba` along `n`, panel outline `pts`, the zone's piece
+    /// `strip`) isn't a rectangle across the panel. With every edge in the zone straight and
+    /// along or across the fold, an outline edge along the fold lies inside the zone (e.g. beside
+    /// a tab folded at its root): name where, and how far to move the fold line to clear it.
+    #[allow(clippy::too_many_arguments)]
+    fn bend_zone_error(&self, panel: Option<usize>, pts: &[Vec2], strip: &[Vec2], mid: Vec2, z: f64, d: Vec2, n: Vec2, s0: f64, ba: f64) -> DocError {
+        let edges = |poly: &[Vec2]| -> Vec<(Vec2, Vec2)> { poly.iter().zip(poly.iter().cycle().skip(1)).map(|(&p, &q)| (p, q)).collect() };
+        let slanted = edges(strip).into_iter().any(|(p, q)| {
+            let v = q - p;
+            let tol = 1e-6 * v.len().max(1e-9);
+            v.dot(d).abs() > tol && v.dot(n).abs() > tol
+        });
+        let tol = 1e-6 * ba.max(1.0);
+        // Outline edges along the fold, strictly inside the zone: (offset along n, nearest end).
+        let inside: Vec<(f64, Vec2)> = edges(pts)
+            .into_iter()
+            .filter(|&(p, q)| (q - p).dot(n).abs() <= 1e-6 * (q - p).len().max(1e-9))
+            .map(|(p, q)| (p.dot(n), if p.dist(mid) <= q.dist(mid) { p } else { q }))
+            .filter(|&(e, _)| e > s0 + tol && e < s0 + ba - tol)
+            .collect();
+        if slanted || inside.is_empty() {
+            return if slanted {
+                DocError::Invalid("not supported yet: folds whose bend zone crosses a slanted or curved edge of the sheet".into())
+            } else {
+                DocError::Invalid("not supported yet: folds whose bend zone crosses the sheet in more than one piece".into())
+            };
+        }
+        let (e_min, e_max) = inside.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &(e, _)| (lo.min(e), hi.max(e)));
+        let at = inside.iter().map(|&(_, c)| c).fold(None, |best: Option<Vec2>, c| match best {
+            Some(b) if b.dist(mid) <= c.dist(mid) => Some(b),
+            _ => Some(c),
+        });
+        let at = at.map(|c| apply_point(&self.world(panel), Vec3::new(c.x, c.y, z))).unwrap_or(Vec3::new(mid.x, mid.y, z));
+        // Shown to 0.01 mm, rounded up so moving by the shown amount does clear the edge.
+        let up = |x: f64| format!("{:.2}", (x * 100.0 - 1e-6).ceil() / 100.0);
+        let num = |x: f64| {
+            let s = format!("{:.3}", if x.abs() < 5e-4 { 0.0 } else { x });
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        };
+        DocError::Invalid(format!(
+            "not supported yet: folds whose bend zone reaches the edge of the sheet without a bend relief; the {} mm bend zone reaches the edge of the sheet at ({}, {}, {}), so move the fold line at least {} mm away from the fixed side or {} mm toward it",
+            num(ba),
+            num(at.x),
+            num(at.y),
+            num(at.z),
+            up(e_max - s0),
+            up(s0 + ba - e_min),
+        ))
     }
 
     /// Name a panel edge (flat coordinates a→b on `panel`, top or bottom face): base edges by the
