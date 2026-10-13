@@ -110,7 +110,7 @@ mod web {
                 let changed = s.is_dirty() && self.autosaved != Some(s.revision);
                 let wait = AUTOSAVE_S - (now - self.autosaved_at);
                 if changed && wait <= 0.0 {
-                    files::autosave(&self.files, Some((&s.doc, s.path.as_deref())));
+                    files::autosave(&self.files, Some((&s.design(), s.path.as_deref())));
                     self.autosaved = Some(s.revision);
                     self.autosaved_at = now;
                 } else if changed {
@@ -250,8 +250,8 @@ mod web {
                     Err(e) => self.app.set_status(e.to_string(), true),
                 },
                 "download_open" => {
-                    let d = &self.app.session.doc;
-                    let result = solidcraft_engine::io::write_design_container(d)
+                    let d = self.app.session.design();
+                    let result = solidcraft_engine::io::write_design_container(&d)
                         .map_err(|e| e.to_string())
                         .and_then(|bytes| files::download(&format!("{}.{}", d.name, solidcraft_engine::io::DESIGN_EXT), &bytes));
                     if let Err(e) = result {
